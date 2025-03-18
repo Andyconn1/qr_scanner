@@ -147,6 +147,24 @@
                 width: 100%;
             }
         }
+
+        #debug {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            color: yellow;
+            background-color: rgba(0, 0, 0, 0.5);
+            padding: 5px;
+            font-size: 12px;
+            display: none;
+        }
+
+        #debugToggle {
+            font-size: 12px;
+            padding: 5px 10px;
+            background-color: #333;
+            margin-top: 10px;
+        }
     </style>
 </head>
 
@@ -156,6 +174,7 @@
         <div class="video-container">
             <video id="video" playsinline autoplay></video>
             <canvas id="canvas"></canvas>
+            <div id="debug"></div>
         </div>
 
         <div class="controls">
@@ -177,6 +196,7 @@
         </div>
 
         <div id="qrList"></div>
+        <button id="debugToggle">Toggle Debug Info</button>
     </div>
 
     <script>
@@ -192,6 +212,8 @@
         const statusDiv = document.getElementById('status');
         const counterSpan = document.getElementById('counter');
         const qrListDiv = document.getElementById('qrList');
+        const debugDiv = document.getElementById('debug');
+        const debugToggle = document.getElementById('debugToggle');
 
         let scanning = false;
         let cameraStream = null;
@@ -199,12 +221,21 @@
         let scannedCodes = new Set();
         let videoDevices = [];
         let currentDeviceIndex = 0;
+        let debugMode = false;
+        let frameCount = 0;
+        let lastDetection = Date.now();
 
         // Helper function to display errors
         function showError(message) {
             statusDiv.innerHTML = message;
             statusDiv.className = 'status error-message';
         }
+
+        // Debug toggle
+        debugToggle.addEventListener('click', () => {
+            debugMode = !debugMode;
+            debugDiv.style.display = debugMode ? 'block' : 'none';
+        });
 
         // Initialize the app
         document.addEventListener('DOMContentLoaded', init);
@@ -266,6 +297,12 @@
             try {
                 if (scanning) return;
 
+                // Attempt to release any existing camera resources first
+                if (cameraStream) {
+                    cameraStream.getTracks().forEach(track => track.stop());
+                    cameraStream = null;
+                }
+
                 let constraints = {
                     video: {
                         facingMode: "environment",
@@ -279,6 +316,10 @@
                     constraints.video.deviceId = { exact: videoDevices[currentDeviceIndex].deviceId };
                 }
 
+                // Update status
+                statusDiv.innerHTML = 'Requesting camera access...';
+                statusDiv.className = 'status';
+
                 // Request camera permissions
                 cameraStream = await navigator.mediaDevices.getUserMedia(constraints);
 
@@ -289,6 +330,7 @@
 
                 // Connect camera stream to video element
                 video.srcObject = cameraStream;
+
                 video.onloadedmetadata = () => {
                     video.play()
                         .then(() => {
@@ -303,6 +345,10 @@
                             startButton.disabled = true;
                             stopButton.disabled = false;
 
+                            // Reset state
+                            frameCount = 0;
+                            lastDetection = Date.now();
+
                             // Start scanning loop
                             scanQRCode();
                         })
@@ -310,12 +356,21 @@
                             showError('Error playing video: ' + error.message);
                         });
                 };
+
+                video.onerror = (error) => {
+                    showError('Video error: ' + (error.message || 'Unknown error'));
+                };
             } catch (error) {
                 if (error.name === 'NotAllowedError') {
                     showError('Camera access denied. Please allow camera access and try again.');
+                } else if (error.name === 'NotFoundError') {
+                    showError('No camera found. Please ensure your camera is connected and not in use by another application.');
+                } else if (error.name === 'NotReadableError') {
+                    showError('Camera is in use by another application. Please close other apps using the camera.');
                 } else {
                     showError('Error starting camera: ' + error.message);
                 }
+                console.error('Camera error:', error);
             }
         }
 
@@ -367,6 +422,18 @@
             if (!scanning) return;
 
             try {
+                frameCount++;
+                const now = Date.now();
+                const timeSinceLastDetection = now - lastDetection;
+
+                // Update debug info
+                if (debugMode) {
+                    debugDiv.textContent =
+                        `Frame: ${frameCount}, ` +
+                        `Res: ${canvas.width}x${canvas.height}, ` +
+                        `Last: ${Math.floor(timeSinceLastDetection)}ms`;
+                }
+
                 // Draw current video frame to canvas
                 ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
@@ -375,11 +442,13 @@
 
                 // Process image data with jsQR
                 const code = jsQR(imageData.data, imageData.width, imageData.height, {
-                    inversionAttempts: "dontInvert",
+                    inversionAttempts: "attemptBoth", // Try both light-on-dark and dark-on-light QR codes
                 });
 
                 // If QR code found
                 if (code) {
+                    lastDetection = now;
+
                     // Check if this is a new unique code
                     if (!scannedCodes.has(code.data)) {
                         // Add to set of unique codes
@@ -407,6 +476,11 @@
                         statusDiv.innerHTML = 'Duplicate QR Code detected. Already in list.';
                     }
                 } else {
+                    // Every 3 seconds without a detection, update status
+                    if (timeSinceLastDetection > 3000 && Math.floor(timeSinceLastDetection / 3000) !== Math.floor((timeSinceLastDetection - 100) / 3000)) {
+                        statusDiv.innerHTML = 'Looking for QR codes... (Make sure code is visible and well-lit)';
+                    }
+
                     // Remove detection box if no QR code found
                     removeDetectionBox();
                 }
@@ -415,7 +489,9 @@
                 requestAnimationFrame(scanQRCode);
             } catch (error) {
                 console.error('Error during QR scanning:', error);
+                statusDiv.innerHTML = 'Scanning error. Retrying...';
                 if (scanning) {
+                    // Keep trying even if there's an error
                     requestAnimationFrame(scanQRCode);
                 }
             }
@@ -467,7 +543,7 @@
                     detectionBox.style.opacity = '0';
                     detectionBox.style.transition = 'opacity 0.5s';
                 }
-            }, 500);
+            }, 1000);
         }
 
         // Remove detection box
