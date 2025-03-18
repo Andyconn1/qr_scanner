@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>QR Code Batch Scanner</title>
+    <title>QR Code Batch Scanner (Enhanced)</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jsQR/1.4.0/jsQR.min.js"></script>
     <style>
         body {
@@ -165,6 +165,36 @@
             background-color: #333;
             margin-top: 10px;
         }
+
+        .settings-panel {
+            width: 100%;
+            max-width: 640px;
+            margin-top: 20px;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            display: none;
+        }
+
+        .setting-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin: 10px 0;
+        }
+
+        .setting-row label {
+            flex: 1;
+            text-align: left;
+            margin-right: 10px;
+        }
+
+        #settingsToggle {
+            font-size: 14px;
+            padding: 5px 10px;
+            background-color: #555;
+            margin-top: 10px;
+        }
     </style>
 </head>
 
@@ -196,6 +226,32 @@
         </div>
 
         <div id="qrList"></div>
+
+        <button id="settingsToggle">Advanced Settings</button>
+        <div id="settingsPanel" class="settings-panel">
+            <div class="setting-row">
+                <label for="zoomLevel">Zoom Level:</label>
+                <input type="range" id="zoomLevel" min="100" max="400" step="50" value="100">
+                <span id="zoomValue">100%</span>
+            </div>
+            <div class="setting-row">
+                <label for="scanFrequency">Scan Frequency:</label>
+                <select id="scanFrequency">
+                    <option value="1">Every frame</option>
+                    <option value="2" selected>Every 2nd frame</option>
+                    <option value="5">Every 5th frame</option>
+                </select>
+            </div>
+            <div class="setting-row">
+                <label for="enhanceContrast">Enhance Contrast:</label>
+                <input type="checkbox" id="enhanceContrast">
+            </div>
+            <div class="setting-row">
+                <label for="invertColors">Try Inverted Colors:</label>
+                <input type="checkbox" id="invertColors" checked>
+            </div>
+        </div>
+
         <button id="debugToggle">Toggle Debug Info</button>
     </div>
 
@@ -214,6 +270,13 @@
         const qrListDiv = document.getElementById('qrList');
         const debugDiv = document.getElementById('debug');
         const debugToggle = document.getElementById('debugToggle');
+        const settingsToggle = document.getElementById('settingsToggle');
+        const settingsPanel = document.getElementById('settingsPanel');
+        const zoomLevel = document.getElementById('zoomLevel');
+        const zoomValue = document.getElementById('zoomValue');
+        const scanFrequency = document.getElementById('scanFrequency');
+        const enhanceContrast = document.getElementById('enhanceContrast');
+        const invertColors = document.getElementById('invertColors');
 
         let scanning = false;
         let cameraStream = null;
@@ -224,6 +287,8 @@
         let debugMode = false;
         let frameCount = 0;
         let lastDetection = Date.now();
+        let processingFrame = false;
+        let currentZoom = 1.0;
 
         // Helper function to display errors
         function showError(message) {
@@ -236,6 +301,48 @@
             debugMode = !debugMode;
             debugDiv.style.display = debugMode ? 'block' : 'none';
         });
+
+        // Settings toggle
+        settingsToggle.addEventListener('click', () => {
+            settingsPanel.style.display = settingsPanel.style.display === 'none' ? 'block' : 'none';
+        });
+
+        // Zoom level change
+        zoomLevel.addEventListener('input', () => {
+            currentZoom = zoomLevel.value / 100;
+            zoomValue.textContent = zoomLevel.value + '%';
+
+            if (video.srcObject) {
+                applyZoom();
+            }
+        });
+
+        // Apply zoom to video
+        function applyZoom() {
+            if (!video.srcObject) return;
+
+            try {
+                const videoTrack = video.srcObject.getVideoTracks()[0];
+
+                if (videoTrack && 'getCapabilities' in videoTrack) {
+                    const capabilities = videoTrack.getCapabilities();
+
+                    // Check if zoom is supported
+                    if (capabilities.zoom) {
+                        const constraints = {
+                            advanced: [{ zoom: currentZoom }]
+                        };
+
+                        videoTrack.applyConstraints(constraints)
+                            .catch(error => {
+                                console.warn('Could not apply zoom:', error);
+                            });
+                    }
+                }
+            } catch (error) {
+                console.warn('Zoom not supported:', error);
+            }
+        }
 
         // Initialize the app
         document.addEventListener('DOMContentLoaded', init);
@@ -306,8 +413,9 @@
                 let constraints = {
                     video: {
                         facingMode: "environment",
-                        width: { ideal: 1280 },
-                        height: { ideal: 720 }
+                        width: { ideal: 1920 },
+                        height: { ideal: 1080 },
+                        focusMode: "continuous"
                     }
                 };
 
@@ -331,12 +439,19 @@
                 // Connect camera stream to video element
                 video.srcObject = cameraStream;
 
+                // Apply zoom if set
+                if (currentZoom !== 1.0) {
+                    applyZoom();
+                }
+
                 video.onloadedmetadata = () => {
                     video.play()
                         .then(() => {
-                            // Set canvas dimensions to match video
-                            canvas.width = video.videoWidth;
-                            canvas.height = video.videoHeight;
+                            // Set canvas dimensions to match video but at a slightly lower resolution for performance
+                            const targetWidth = 1024; // Target width for processing
+                            const scaleFactor = targetWidth / video.videoWidth;
+                            canvas.width = targetWidth;
+                            canvas.height = video.videoHeight * scaleFactor;
 
                             // Update UI
                             scanning = true;
@@ -417,32 +532,74 @@
             statusDiv.innerHTML = 'Camera selected. Click "Start Scanning" to begin.';
         }
 
+        // Adjust image data for better QR code detection
+        function processImageData(imageData) {
+            if (!enhanceContrast.checked) return imageData;
+
+            const data = imageData.data;
+
+            // Apply a simple contrast enhancement
+            for (let i = 0; i < data.length; i += 4) {
+                // Calculate brightness (simple average)
+                const brightness = (data[i] + data[i + 1] + data[i + 2]) / 3;
+
+                // Apply contrast
+                const factor = 1.5; // Contrast factor
+                const intercept = 128 * (1 - factor);
+
+                data[i] = factor * data[i] + intercept;     // R
+                data[i + 1] = factor * data[i + 1] + intercept; // G
+                data[i + 2] = factor * data[i + 2] + intercept; // B
+            }
+
+            return imageData;
+        }
+
         // Scan for QR codes
         function scanQRCode() {
             if (!scanning) return;
+            if (processingFrame) {
+                requestAnimationFrame(scanQRCode);
+                return;
+            }
 
             try {
                 frameCount++;
                 const now = Date.now();
                 const timeSinceLastDetection = now - lastDetection;
 
+                // Check if we should process this frame based on scan frequency
+                const skipFrame = frameCount % parseInt(scanFrequency.value) !== 0;
+                if (skipFrame) {
+                    requestAnimationFrame(scanQRCode);
+                    return;
+                }
+
+                processingFrame = true;
+
                 // Update debug info
                 if (debugMode) {
                     debugDiv.textContent =
                         `Frame: ${frameCount}, ` +
                         `Res: ${canvas.width}x${canvas.height}, ` +
-                        `Last: ${Math.floor(timeSinceLastDetection)}ms`;
+                        `Last: ${Math.floor(timeSinceLastDetection)}ms, ` +
+                        `Zoom: ${currentZoom.toFixed(1)}x`;
                 }
 
                 // Draw current video frame to canvas
                 ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
                 // Get image data from canvas
-                const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+                let imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
 
-                // Process image data with jsQR
-                const code = jsQR(imageData.data, imageData.width, imageData.height, {
-                    inversionAttempts: "attemptBoth", // Try both light-on-dark and dark-on-light QR codes
+                // Process image to enhance contrast if needed
+                if (enhanceContrast.checked) {
+                    imageData = processImageData(imageData);
+                }
+
+                // Attempt to detect QR code
+                let code = jsQR(imageData.data, imageData.width, imageData.height, {
+                    inversionAttempts: invertColors.checked ? "attemptBoth" : "dontInvert",
                 });
 
                 // If QR code found
@@ -478,18 +635,22 @@
                 } else {
                     // Every 3 seconds without a detection, update status
                     if (timeSinceLastDetection > 3000 && Math.floor(timeSinceLastDetection / 3000) !== Math.floor((timeSinceLastDetection - 100) / 3000)) {
-                        statusDiv.innerHTML = 'Looking for QR codes... (Make sure code is visible and well-lit)';
+                        statusDiv.innerHTML = 'Looking for QR codes... (Try adjusting distance, angle, or lighting)';
                     }
 
                     // Remove detection box if no QR code found
                     removeDetectionBox();
                 }
 
+                processingFrame = false;
+
                 // Continue scanning
                 requestAnimationFrame(scanQRCode);
             } catch (error) {
                 console.error('Error during QR scanning:', error);
                 statusDiv.innerHTML = 'Scanning error. Retrying...';
+                processingFrame = false;
+
                 if (scanning) {
                     // Keep trying even if there's an error
                     requestAnimationFrame(scanQRCode);
